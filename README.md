@@ -483,22 +483,45 @@ docs:   documentation only
 
 ### Prompt iteration example
 
-**Initial prompt:**
-> "Write a Django REST API that classifies documents using an LLM and extracts fields"
-
-The output was a single-file monolith with hardcoded API keys and no separation of concerns. **Discarded entirely.**
-
 **Iterated prompt:**
-> "I need a Django app with:
-> (1) Strategy pattern for LLM providers selectable via LLM_PROVIDER env var — ollama and openai
-> (2) Separate modules for PDF extraction, OCR, confidence scoring, and pipeline orchestration
-> (3) The LLM prompt must enforce JSON-only output with a defined field schema per document category
-> (4) No keys in code — all config via .env
-> Show me the directory structure first, then implement each file separately."
+> "I'm building a document classification microservice for an EU worker-posting compliance platform. The service receives heterogeneous HR documents — payslips, employment contracts, identity documents, invoices, tax forms — and must automatically classify them and extract structured fields using an LLM.
+>
+> Here are my exact architectural requirements:
+>
+> **LLM Layer:**
+> I want a strategy pattern with an abstract base class `BaseLLMProvider` defining a single method `classify_and_extract(text: str, filename: str) -> ClassificationResult` where `ClassificationResult` is a dataclass with `category`, `extracted_fields`, and `model_used`. Concrete implementations for `OllamaProvider` (local, via HTTP to `localhost:11434/api/chat`) and `OpenAIProvider` (remote, via official SDK). A `factory.py` reads `LLM_PROVIDER` env var and returns the correct instance. Nothing outside `factory.py` should import concrete provider classes.
+>
+> **Prompt Engineering:**
+> The system prompt must define exactly 6 categories: `identity_document`, `employment_contract`, `payslip`, `invoice`, `tax_form`, `other`. For each category except `other`, define a fixed field schema the model must extract. The response must be JSON only — no markdown fences, no preamble. Missing fields must be `null`, never invented. Dates normalised to ISO-8601. The filename must be included in the user message as a classification hint since Italian filenames like `busta_paga_marzo.pdf` are strong signals.
+>
+> **Extraction Layer:**
+> Two extractors: `pdf_extractor.py` using pdfplumber (preserves table layout for payslips/invoices), and `ocr_extractor.py` using EasyOCR with Italian and English language models. EasyOCR must use a lazy singleton with a threading lock — do not initialise the reader at module import time.
+>
+> **Confidence Scoring:**
+> A deterministic rule-based function in `confidence.py` — not LLM self-reported confidence. Three weighted signals: field completeness (60%), extracted text length (20%), filename keyword match (20%). Returns `high`, `medium`, or `low`. The expected field sets must mirror the LLM prompt schema exactly.
+>
+> **Pipeline:**
+> A thin `pipeline.py` orchestrator that calls: validate → extract → LLM classify → score confidence → persist. No business logic in views.
+>
+> **API:**
+> Three DRF APIViews: `POST /api/documents/classify/` (multipart, max 3 files, PDF/JPEG/PNG, max 5MB each), `GET /api/documents/{id}/`, `GET /api/documents/` with `?category=` and `?confidence=` filters. File validation uses `python-magic` for MIME sniffing — not just extension checking.
+>
+> **Model:**
+> A single `ClassifiedDocument` model with UUID primary key, JSONField for extracted fields, indexes on `category`, `confidence`, and `created_at`.
+>
+> **Error handling:**
+> `LLMProviderError` raised by providers, caught in views and returned as `503`. Validation errors return `400` with descriptive messages. Timeout of 30 seconds enforced on all LLM calls.
+>
+> **Testing:**
+> Full test suite using `unittest.mock`. All external dependencies mocked — no real API calls. Tests must cover: single file happy path, multiple files, no files, too many files, invalid extension, file too large, LLM unreachable, GET existing ID, GET non-existent ID, list with filters, confidence scoring edge cases, provider factory selection.
+>
+> Show me the directory structure first with a one-line description of each file's responsibility. Then implement each file one at a time, starting with the models and working up to the views."
 
-This produced the modular architecture used in the project. The key iterations were specifying the **strategy pattern** explicitly, requiring **JSON-only output enforcement** in the prompt design, and breaking the request into parts rather than asking for everything at once.
+This produced the clean modular architecture used in the project. The key difference from the first prompt was specifying **exact interfaces**, **exact constraints**, and **exact behaviour** — treating Claude as an implementer of a design, not as a designer.
 
-### Where AI output was corrected or discarded
+---
+
+### Where AI output was corrected or discarded(some examples)
 
 **Correction 1 — Confidence scoring**: The AI initially had the LLM return its own confidence score as part of the classification JSON. This was discarded because LLM self-reported confidence is not calibrated and cannot be independently audited. The scoring was replaced with a deterministic rule-based function in `confidence.py` that can be tuned and tested independently of the LLM.
 
